@@ -1,5 +1,11 @@
+mod structs;
+
 use dotenv::dotenv;
-use serde::{Deserialize, Serialize};
+use lambda_runtime::{service_fn, tracing, Error, LambdaEvent};
+use structs::{
+    DiscordMessage, DiscordMessageEmbed, DiscordMessageEmbedField, DiscordMessageEmbedImage,
+    PictureOfTheDay, Request, Response,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -10,38 +16,40 @@ pub enum CustomError {
     SerdeJson(#[from] serde_json::Error),
 }
 
-#[derive(Serialize, Deserialize)]
-struct PictureOfTheDay {
-    title: String,
-    copyright: String,
-    explanation: String,
-    hdurl: String,
+#[tokio::main]
+async fn main() -> Result<(), CustomError> {
+    tracing::init_default_subscriber();
+
+    let func = service_fn(handler);
+    let _ = lambda_runtime::run(func).await;
+
+    Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct DiscordMessage {
-    username: String,
-    embeds: Vec<DiscordMessageEmbed>,
+pub(crate) async fn handler(event: LambdaEvent<Request>) -> Result<Response, Error> {
+    let result = fetch_picture_and_send_message().await;
+
+    match result {
+        Ok(_) => {
+            let resp = Response {
+                req_id: event.context.request_id,
+                msg: format!("Sent message"),
+            };
+
+            Ok(resp)
+        }
+        Err(error) => panic!("{:?}", error),
+    }
 }
 
-#[derive(Serialize, Deserialize)]
-struct DiscordMessageEmbed {
-    title: String,
-    description: String,
-    fields: Vec<DiscordMessageEmbedField>,
-    image: DiscordMessageEmbedImage,
-}
+async fn fetch_picture_and_send_message() -> Result<(), CustomError> {
+    dotenv().ok();
 
-#[derive(Serialize, Deserialize)]
-struct DiscordMessageEmbedField {
-    name: String,
-    value: String,
-    inline: bool,
-}
+    let picture_of_the_day = fetch_astronomy_picture_of_the_day().await?;
 
-#[derive(Serialize, Deserialize)]
-struct DiscordMessageEmbedImage {
-    url: String,
+    let _ = send_picture_of_the_day_to_discord(picture_of_the_day).await?;
+
+    Ok(())
 }
 
 async fn fetch_astronomy_picture_of_the_day() -> Result<PictureOfTheDay, CustomError> {
@@ -58,6 +66,15 @@ async fn fetch_astronomy_picture_of_the_day() -> Result<PictureOfTheDay, CustomE
 async fn send_picture_of_the_day_to_discord(
     picture_of_the_day: PictureOfTheDay,
 ) -> Result<(), CustomError> {
+    let fields = match picture_of_the_day.copyright {
+        Some(copyright) => vec![DiscordMessageEmbedField {
+            name: "Copyright".to_owned(),
+            value: copyright,
+            inline: true,
+        }],
+        None => vec![],
+    };
+
     let message = DiscordMessage {
         username: "APOD".to_string(),
         embeds: vec![DiscordMessageEmbed {
@@ -66,31 +83,15 @@ async fn send_picture_of_the_day_to_discord(
             image: DiscordMessageEmbedImage {
                 url: picture_of_the_day.hdurl,
             },
-            fields: vec![DiscordMessageEmbedField {
-                name: "Copyright".to_owned(),
-                value: picture_of_the_day.copyright,
-                inline: true,
-            }],
+            fields: fields,
         }],
     };
-
     let client = reqwest::Client::new();
     let _ = client
         .post(std::env::var("DISCORD_WEB_HOOK").expect("Unexpected DISCORD_WEB_HOOK"))
         .json(&message)
         .send()
-        .await;
-
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<(), CustomError> {
-    dotenv().ok();
-
-    let picture_of_the_day = fetch_astronomy_picture_of_the_day().await?;
-
-    let _ = send_picture_of_the_day_to_discord(picture_of_the_day).await?;
+        .await?;
 
     Ok(())
 }
